@@ -1,0 +1,13 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.ninjamaxyt.kuruxcompanion'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'com.ninjamaxyt.kuruxcompanion'
+        minSdk 23
+        targetSdk 32
+        versionCode 1
+        versionName '1.0'
+    }
+}
