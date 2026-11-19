@@ -1,18 +1,28 @@
 package com.ninjamaxyt.kuruxcompanion;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.ActivityManager;
-import android.app.AlertDialog;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.RemoteInput;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -29,24 +39,24 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class MainActivity extends Activity {
+
+    private static final int REQ_NOTIF_PERM = 101;
+    private static final int REQ_PICK_MODULE = 102;
 
     private LinearLayout contentContainer;
     private TextView[] navItems = new TextView[4];
     private LinearLayout fabAddModule;
     private int currentTab = 0;
-    private boolean isAdbActive = false;
-    private String adbStatusText = "Need extra step";
-    private String adbSubText = "Tap to configure Wireless ADB / TCP 5555";
+    private SharedPreferences prefs;
     private List<String> importedModules = new ArrayList<>();
 
-    // Warm Material You (AxManager style) Palette
     private final int BG_COLOR = Color.parseColor("#FAF6F2");
     private final int CARD_BG = Color.parseColor("#F2ECE6");
     private final int ACCENT_BROWN = Color.parseColor("#8B5A2B");
@@ -56,31 +66,45 @@ public class MainActivity extends Activity {
     private final int ALERT_CORAL = Color.parseColor("#E26D5C");
     private final int SUCCESS_GREEN = Color.parseColor("#2E7D32");
 
+    private final BroadcastReceiver adbReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            switchTab(currentTab);
+        }
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        prefs = getSharedPreferences("kurux_prefs", Context.MODE_PRIVATE);
+        Set<String> savedMods = prefs.getStringSet("imported_modules", new HashSet<>());
+        importedModules.addAll(savedMods);
+
         getWindow().setStatusBarColor(BG_COLOR);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
-
-        importedModules.add("KuruX FF Engine v2.0 • Non-Root Gaming Profile");
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(BG_COLOR);
 
         ScrollView scrollView = new ScrollView(this);
         scrollView.setFillViewport(true);
-        scrollView.setPadding(dp(18), dp(14), dp(18), dp(105));
+
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            int topInset = insets.getSystemWindowInsetTop();
+            int bottomInset = insets.getSystemWindowInsetBottom();
+            scrollView.setPadding(dp(18), topInset + dp(16), dp(18), bottomInset + dp(105));
+            return insets;
+        });
 
         contentContainer = new LinearLayout(this);
         contentContainer.setOrientation(LinearLayout.VERTICAL);
         scrollView.addView(contentContainer);
         root.addView(scrollView);
 
-        // Floating Pill Bottom Navigation + FAB (+)
         LinearLayout bottomWrapper = new LinearLayout(this);
         bottomWrapper.setOrientation(LinearLayout.HORIZONTAL);
         bottomWrapper.setGravity(Gravity.CENTER);
-        bottomWrapper.setPadding(dp(16), dp(8), dp(16), dp(18));
+        bottomWrapper.setPadding(dp(16), dp(8), dp(16), dp(22));
 
         LinearLayout pillBar = new LinearLayout(this);
         pillBar.setOrientation(LinearLayout.HORIZONTAL);
@@ -116,7 +140,7 @@ public class MainActivity extends Activity {
         plus.setTextColor(TEXT_PRIMARY);
         fabAddModule.addView(plus);
         fabAddModule.setVisibility(View.GONE);
-        fabAddModule.setOnClickListener(v -> showImportModuleDialog());
+        fabAddModule.setOnClickListener(v -> openModuleFilePicker());
         bottomWrapper.addView(fabAddModule);
 
         FrameLayout.LayoutParams navParams = new FrameLayout.LayoutParams(
@@ -126,6 +150,27 @@ public class MainActivity extends Activity {
 
         setContentView(root);
         switchTab(0);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(adbReceiver, new IntentFilter("com.ninjamaxyt.kuruxcompanion.ADB_PAIRED"), Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(adbReceiver, new IntentFilter("com.ninjamaxyt.kuruxcompanion.ADB_PAIRED"));
+        }
+        switchTab(currentTab);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        try { unregisterReceiver(adbReceiver); } catch (Exception ignored) {}
+    }
+
+    private boolean isAdbReady() {
+        return prefs.getBoolean("adb_active", false);
     }
 
     private void switchTab(int index) {
@@ -139,7 +184,7 @@ public class MainActivity extends Activity {
                 navItems[i].setTextColor(TEXT_PRIMARY);
             }
         }
-        fabAddModule.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
+        fabAddModule.setVisibility((index == 2 && isAdbReady()) ? View.VISIBLE : View.GONE);
         contentContainer.removeAllViews();
 
         if (index == 0) renderHomeTab();
@@ -149,7 +194,8 @@ public class MainActivity extends Activity {
     }
 
     private void renderHomeTab() {
-        // Header with Logo
+        boolean ready = isAdbReady();
+
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
@@ -164,33 +210,32 @@ public class MainActivity extends Activity {
 
         LinearLayout titleBox = new LinearLayout(this);
         titleBox.setOrientation(LinearLayout.VERTICAL);
-        TextView title = makeText("KuruX Manager", 22, true, TEXT_PRIMARY);
-        TextView sub = makeText("v2.0.0 • Non-Root ADB & Gaming Suite", 12, false, TEXT_SECONDARY);
-        titleBox.addView(title);
-        titleBox.addView(sub);
+        titleBox.addView(makeText("KuruX Manager", 22, true, TEXT_PRIMARY));
+        titleBox.addView(makeText("v2.1.0 • Wireless ADB & Non-Root Engine", 12, false, TEXT_SECONDARY));
         header.addView(titleBox);
         contentContainer.addView(header);
 
-        // Status Banner Card (Like AxManager "Need extra step" / "Working")
         LinearLayout statusCard = new LinearLayout(this);
         statusCard.setOrientation(LinearLayout.VERTICAL);
-        statusCard.setBackground(roundRect(isAdbActive ? SUCCESS_GREEN : ALERT_CORAL, 22));
+        statusCard.setBackground(roundRect(ready ? SUCCESS_GREEN : ALERT_CORAL, 22));
         statusCard.setPadding(dp(18), dp(18), dp(18), dp(18));
 
         LinearLayout topRow = new LinearLayout(this);
         topRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView stTitle = makeText(adbStatusText, 20, true, Color.WHITE);
-        LinearLayout.LayoutParams stP = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        stTitle.setLayoutParams(stP);
+        TextView stTitle = makeText(ready ? "Running" : "Need extra step", 20, true, Color.WHITE);
+        stTitle.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         topRow.addView(stTitle);
 
-        TextView badge = makeText(isAdbActive ? "Shell Ready" : "Action needed", 11, true, Color.WHITE);
+        TextView badge = makeText(ready ? "ADB Active" : "Action needed", 11, true, Color.WHITE);
         badge.setBackground(roundRect(Color.parseColor("#33000000"), 14));
         badge.setPadding(dp(10), dp(4), dp(10), dp(4));
         topRow.addView(badge);
         statusCard.addView(topRow);
 
-        TextView actionPill = makeText("ⓘ  " + adbSubText + "  ›", 12, true, Color.WHITE);
+        String subInfo = ready
+                ? prefs.getString("adb_mode", "Wireless ADB Connected")
+                : "ⓘ  Tap here to start Wireless Debugging Pairing  ›";
+        TextView actionPill = makeText(subInfo, 12, true, Color.WHITE);
         actionPill.setBackground(roundRect(Color.parseColor("#26FFFFFF"), 14));
         actionPill.setPadding(dp(12), dp(10), dp(12), dp(10));
         LinearLayout.LayoutParams pillP = new LinearLayout.LayoutParams(
@@ -202,15 +247,14 @@ public class MainActivity extends Activity {
         statusCard.setOnClickListener(v -> renderActivateScreen());
         contentContainer.addView(statusCard);
 
-        // Quick Floating Panel Launcher Card
         LinearLayout overlayCard = makeCard();
         LinearLayout ovRow = new LinearLayout(this);
         ovRow.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout ovText = new LinearLayout(this);
         ovText.setOrientation(LinearLayout.VERTICAL);
         ovText.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        ovText.addView(makeText("KuruX Floating Control Panel", 15, true, TEXT_PRIMARY));
-        ovText.addView(makeText("Launch in-game overlay & quick booster", 12, false, TEXT_SECONDARY));
+        ovText.addView(makeText("Floating Control Panel", 15, true, TEXT_PRIMARY));
+        ovText.addView(makeText("In-game overlay & quick game launcher", 12, false, TEXT_SECONDARY));
         ovRow.addView(ovText);
 
         Button btnOverlay = makePillButton("Launch", ACCENT_BROWN, Color.WHITE);
@@ -219,7 +263,6 @@ public class MainActivity extends Activity {
         overlayCard.addView(ovRow);
         contentContainer.addView(overlayCard);
 
-        // Device Information Section
         TextView devSec = makeText("Device Information", 14, true, ACCENT_BROWN);
         devSec.setPadding(dp(4), dp(16), 0, dp(8));
         contentContainer.addView(devSec);
@@ -238,45 +281,33 @@ public class MainActivity extends Activity {
                 "Kernel", System.getProperty("os.version")));
         infoCard.addView(makeDivider());
         infoCard.addView(makeInfoRow("ABI Supported", Build.SUPPORTED_ABIS[0],
-                "Execution Mode", isAdbActive ? "ADB Shell (UID 2000)" : "Standard App"));
+                "Shell Status", ready ? "u:r:shell:s0 (Unlocked)" : "Locked (Pair Required)"));
         contentContainer.addView(infoCard);
     }
 
     private void renderActivateScreen() {
         contentContainer.removeAllViews();
 
-        LinearLayout topBar = new LinearLayout(this);
-        topBar.setGravity(Gravity.CENTER_VERTICAL);
-        topBar.setPadding(0, 0, 0, dp(14));
-        TextView back = makeText("←  Activate ADB Engine", 20, true, TEXT_PRIMARY);
+        TextView back = makeText("←  Wireless Debugging Setup", 20, true, TEXT_PRIMARY);
+        back.setPadding(0, 0, 0, dp(14));
         back.setOnClickListener(v -> switchTab(0));
-        topBar.addView(back);
-        contentContainer.addView(topBar);
+        contentContainer.addView(back);
 
-        // Card 1: Wireless Debugging Pairing (Android 11+)
         LinearLayout pairCard = makeCard();
-        pairCard.addView(makeText("Start via Wireless Debugging", 16, true, TEXT_PRIMARY));
-        pairCard.addView(makeText("On Android 11+, enable Wireless Debugging in Developer Options and enter the 6-digit Pairing Code & Port below.", 12, false, TEXT_SECONDARY));
-
-        LinearLayout inputRow = new LinearLayout(this);
-        inputRow.setOrientation(LinearLayout.HORIZONTAL);
-        inputRow.setPadding(0, dp(12), 0, dp(12));
-
-        EditText etPort = makeInput("Pair Port (e.g. 37415)");
-        LinearLayout.LayoutParams p1 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        p1.rightMargin = dp(8);
-        etPort.setLayoutParams(p1);
-
-        EditText etCode = makeInput("6-Digit Code");
-        etCode.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        inputRow.addView(etPort);
-        inputRow.addView(etCode);
-        pairCard.addView(inputRow);
+        pairCard.addView(makeText("Step 1: Start via Wireless Debugging", 16, true, TEXT_PRIMARY));
+        pairCard.addView(makeText("1. Tap 'Start Pairing' to trigger the Pairing Notification.\n2. Open Developer Options > Wireless Debugging > Pair device with pairing code.\n3. Pull down notification shade and enter the 6-digit code in KuruX notification.", 12, false, TEXT_SECONDARY));
 
         LinearLayout btnRow1 = new LinearLayout(this);
-        Button btnDevOpts = makePillButton("Developer Options", ACCENT_LIGHT, TEXT_PRIMARY);
-        btnDevOpts.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        btnRow1.setPadding(0, dp(14), 0, 0);
+
+        Button btnStartPair = makePillButton("1. Start Pairing", ACCENT_BROWN, Color.WHITE);
+        btnStartPair.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        btnStartPair.setOnClickListener(v -> triggerShizukuStyleNotification());
+
+        Button btnDevOpts = makePillButton("2. Developer Options", ACCENT_LIGHT, TEXT_PRIMARY);
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        bp.leftMargin = dp(8);
+        btnDevOpts.setLayoutParams(bp);
         btnDevOpts.setOnClickListener(v -> {
             try {
                 startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS));
@@ -285,200 +316,134 @@ public class MainActivity extends Activity {
             }
         });
 
-        Button btnPair = makePillButton("Pair & Start", ACCENT_BROWN, Color.WHITE);
-        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        bp.leftMargin = dp(8);
-        btnPair.setLayoutParams(bp);
-        btnPair.setOnClickListener(v -> {
-            String port = etPort.getText().toString().trim();
-            String code = etCode.getText().toString().trim();
-            if (port.isEmpty() || code.length() < 6) {
-                Toast.makeText(this, "Enter valid Pairing Port & 6-digit Code", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            isAdbActive = true;
-            adbStatusText = "Working (Wireless ADB)";
-            adbSubText = "Paired on port " + port + " • Shell Ready";
-            Toast.makeText(this, "Wireless ADB Paired Successfully!", Toast.LENGTH_SHORT).show();
-            switchTab(0);
-        });
-
+        btnRow1.addView(btnStartPair);
         btnRow1.addView(btnDevOpts);
-        btnRow1.addView(btnPair);
         pairCard.addView(btnRow1);
         contentContainer.addView(pairCard);
 
-        // Card 2: TCP Debugging (Port 5555)
         LinearLayout tcpCard = makeCard();
-        tcpCard.addView(makeText("TCP Debugging (Port 5555)", 16, true, TEXT_PRIMARY));
-        tcpCard.addView(makeText("Connect directly to localhost:5555 if TCP/IP ADB is already enabled on this device.", 12, false, TEXT_SECONDARY));
-
-        EditText etTcpPort = makeInput("5555");
-        etTcpPort.setText("5555");
-        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        tp.topMargin = dp(10);
-        tp.bottomMargin = dp(12);
-        etTcpPort.setLayoutParams(tp);
-        tcpCard.addView(etTcpPort);
+        tcpCard.addView(makeText("Step 2: TCP Debugging (Port 5555)", 16, true, TEXT_PRIMARY));
+        tcpCard.addView(makeText("If ADB TCP/IP is already active on port 5555, connect directly:", 12, false, TEXT_SECONDARY));
 
         Button btnTcp = makePillButton("▶  Connect to TCP 5555", ACCENT_BROWN, Color.WHITE);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tp.topMargin = dp(12);
+        btnTcp.setLayoutParams(tp);
         btnTcp.setOnClickListener(v -> {
-            isAdbActive = true;
-            adbStatusText = "Working (TCP 5555)";
-            adbSubText = "Connected to 127.0.0.1:" + etTcpPort.getText().toString();
-            Toast.makeText(this, "Connected to Local TCP ADB!", Toast.LENGTH_SHORT).show();
+            prefs.edit().putBoolean("adb_active", true).putString("adb_mode", "Connected via TCP 127.0.0.1:5555").apply();
+            Toast.makeText(this, "TCP 5555 Connected! Apps & Modules Unlocked.", Toast.LENGTH_SHORT).show();
             switchTab(0);
         });
         tcpCard.addView(btnTcp);
         contentContainer.addView(tcpCard);
     }
 
-    private void renderAppsTab() {
-        contentContainer.addView(makeText("Background App Cleaner", 22, true, TEXT_PRIMARY));
-        contentContainer.addView(makeText("Freeze or Force-Stop background apps via ADB Engine", 12, false, TEXT_SECONDARY));
-
-        EditText search = makeInput("Search installed apps...");
-        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        sp.topMargin = dp(12);
-        sp.bottomMargin = dp(8);
-        search.setLayoutParams(sp);
-        contentContainer.addView(search);
-
-        LinearLayout listHolder = new LinearLayout(this);
-        listHolder.setOrientation(LinearLayout.VERTICAL);
-        contentContainer.addView(listHolder);
-
-        PackageManager pm = getPackageManager();
-        List<ApplicationInfo> apps = pm.getInstalledApplications(PackageManager.GET_META_DATA);
-        List<ApplicationInfo> userApps = new ArrayList<>();
-        for (ApplicationInfo info : apps) {
-            if ((info.flags & ApplicationInfo.FLAG_SYSTEM) == 0 && !info.packageName.equals(getPackageName())) {
-                userApps.add(info);
+    private void triggerShizukuStyleNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF_PERM);
+                return;
             }
         }
-        Collections.sort(userApps, (a, b) -> pm.getApplicationLabel(a).toString()
-                .compareToIgnoreCase(pm.getApplicationLabel(b).toString()));
 
-        Runnable populate = () -> {
-            listHolder.removeAllViews();
-            String q = search.getText().toString().toLowerCase();
-            for (ApplicationInfo app : userApps) {
-                String label = pm.getApplicationLabel(app).toString();
-                if (!q.isEmpty() && !label.toLowerCase().contains(q) && !app.packageName.toLowerCase().contains(q)) {
-                    continue;
-                }
-                LinearLayout rowCard = makeCard();
-                LinearLayout row = new LinearLayout(this);
-                row.setGravity(Gravity.CENTER_VERTICAL);
+        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            nm.createNotificationChannel(new NotificationChannel(
+                    PairingReceiver.CHANNEL_ID, "Wireless ADB Pairing", NotificationManager.IMPORTANCE_HIGH));
+        }
 
-                ImageView icon = new ImageView(this);
-                icon.setImageDrawable(pm.getApplicationIcon(app));
-                LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(dp(38), dp(38));
-                ip.rightMargin = dp(12);
-                icon.setLayoutParams(ip);
-                row.addView(icon);
+        RemoteInput remoteInput = new RemoteInput.Builder(PairingReceiver.KEY_PAIRING_CODE)
+                .setLabel("Enter 6-digit pairing code")
+                .build();
 
-                LinearLayout infoCol = new LinearLayout(this);
-                infoCol.setOrientation(LinearLayout.VERTICAL);
-                infoCol.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-                infoCol.addView(makeText(label, 14, true, TEXT_PRIMARY));
-                infoCol.addView(makeText(app.packageName, 11, false, TEXT_SECONDARY));
-                row.addView(infoCol);
+        Intent replyIntent = new Intent(this, PairingReceiver.class);
+        PendingIntent replyPendingIntent = PendingIntent.getBroadcast(
+                this, 0, replyIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE);
 
-                Button btnFreeze = makePillButton(app.enabled ? "Freeze" : "Enable",
-                        app.enabled ? ACCENT_LIGHT : SUCCESS_GREEN,
-                        app.enabled ? TEXT_PRIMARY : Color.WHITE);
-                btnFreeze.setOnClickListener(v -> {
-                    if (!isAdbActive) {
-                        Toast.makeText(this, "Activate Wireless ADB on Home tab first!", Toast.LENGTH_SHORT).show();
-                        return;
-                    }
-                    Toast.makeText(this, "ADB Command queued: pm disable-user " + app.packageName, Toast.LENGTH_SHORT).show();
-                });
-                row.addView(btnFreeze);
-                rowCard.addView(row);
-                listHolder.addView(rowCard);
-            }
-        };
+        Notification.Action action = new Notification.Action.Builder(
+                R.drawable.ic_kurux_logo, "Enter Pairing Code", replyPendingIntent)
+                .addRemoteInput(remoteInput).build();
 
-        search.addTextChangedListener(new TextWatcher() {
-            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-            public void onTextChanged(CharSequence s, int start, int before, int count) { populate.run(); }
-            public void afterTextChanged(Editable s) {}
-        });
-        populate.run();
+        Notification notif = new Notification.Builder(this, PairingReceiver.CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_kurux_logo)
+                .setContentTitle("Wireless Debugging Pairing Service")
+                .setContentText("Searching for pairing service... Tap 'Enter Pairing Code'")
+                .setOngoing(true)
+                .addAction(action)
+                .build();
+
+        nm.notify(PairingReceiver.NOTIF_ID, notif);
+        Toast.makeText(this, "Pairing notification sent! Pull down notification bar.", Toast.LENGTH_LONG).show();
     }
 
-    private void renderModulesTab() {
-        contentContainer.addView(makeText("Gaming Plugins & Modules", 22, true, TEXT_PRIMARY));
-        contentContainer.addView(makeText("Import custom non-root .sh / .zip optimization scripts", 12, false, TEXT_SECONDARY));
-
-        for (String mod : importedModules) {
-            LinearLayout modCard = makeCard();
-            LinearLayout row = new LinearLayout(this);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-
-            LinearLayout col = new LinearLayout(this);
-            col.setOrientation(LinearLayout.VERTICAL);
-            col.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-            TextView tag = makeText("NON-ROOT  •  ADB SHELL", 10, true, ACCENT_BROWN);
-            col.addView(tag);
-            col.addView(makeText(mod, 14, true, TEXT_PRIMARY));
-            col.addView(makeText("Author: @NINJA MAX YT • Tap switch to execute", 11, false, TEXT_SECONDARY));
-            row.addView(col);
-
-            Switch sw = new Switch(this);
-            sw.setOnCheckedChangeListener((btn, checked) -> {
-                if (checked && !isAdbActive) {
-                    sw.setChecked(false);
-                    Toast.makeText(this, "Activate ADB Engine first!", Toast.LENGTH_SHORT).show();
-                    return;
-                }
-                Toast.makeText(this, checked ? "Module Activated!" : "Module Reverted", Toast.LENGTH_SHORT).show();
-            });
-            row.addView(sw);
-            modCard.addView(row);
-            contentContainer.addView(modCard);
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_NOTIF_PERM && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            triggerShizukuStyleNotification();
+        } else {
+            Toast.makeText(this, "Notification permission required for Pairing!", Toast.LENGTH_LONG).show();
         }
+    }
+MODULE);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_PICK_MODULE && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            Uri uri = data.getData();
+            String fileName = getFileNameFromUri(uri);
+            if (!importedModules.contains(fileName)) {
+                importedModules.add(fileName);
+                prefs.edit().putStringSet("imported_modules", new HashSet<>(importedModules)).apply();
+            }
+            Toast.makeText(this, "Imported: " + fileName, Toast.LENGTH_SHORT).show();
+            switchTab(2);
+        }
+    }
+
+    private String getFileNameFromUri(Uri uri) {
+        String result = "Custom_Module.zip";
+        try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) result = cursor.getString(idx);
+            }
+        } catch (Exception ignored) {}
+        return result;
     }
 
     private void renderSettingsTab() {
         contentContainer.addView(makeText("Settings", 22, true, TEXT_PRIMARY));
-
         LinearLayout envCard = makeCard();
-        envCard.addView(makeText("Environment & Gaming Controls", 14, true, ACCENT_BROWN));
+        envCard.addView(makeText("Environment & ADB Controls", 14, true, ACCENT_BROWN));
         envCard.addView(makeSettingSwitch("Auto-Clean Background RAM on Launch", "Frees cached processes before game start", true));
         envCard.addView(makeDivider());
         envCard.addView(makeSettingSwitch("Keep Screen Awake in Game", "Prevents display dim during matches", true));
-        envCard.addView(makeDivider());
-        envCard.addView(makeSettingSwitch("Auto Reconnect TCP 5555", "Reconnects local ADB shell on app open", false));
         contentContainer.addView(envCard);
-    }
 
-    private void showImportModuleDialog() {
-        EditText input = makeInput("Enter module name or script command...");
-        new AlertDialog.Builder(this)
-                .setTitle("Import Custom Gaming Module")
-                .setMessage("Add a non-root shell profile or module script:")
-                .setView(input)
-                .setPositiveButton("Import", (d, w) -> {
-                    String name = input.getText().toString().trim();
-                    if (!name.isEmpty()) {
-                        importedModules.add(name);
-                        switchTab(2);
-                    }
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+        LinearLayout resetCard = makeCard();
+        resetCard.addView(makeText("Reset ADB & Modules", 15, true, ALERT_CORAL));
+        resetCard.addView(makeText("Disconnect Wireless ADB session and clear imported modules", 12, false, TEXT_SECONDARY));
+        Button btnReset = makePillButton("Reset KuruX Manager", ALERT_CORAL, Color.WHITE);
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rp.topMargin = dp(10);
+        btnReset.setLayoutParams(rp);
+        btnReset.setOnClickListener(v -> {
+            importedModules.clear();
+            prefs.edit().clear().apply();
+            Toast.makeText(this, "Reset Complete!", Toast.LENGTH_SHORT).show();
+            switchTab(0);
+        });
+        resetCard.addView(btnReset);
+        contentContainer.addView(resetCard);
     }
 
     private void startFloatingOverlay() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + getPackageName()));
-            startActivity(intent);
+            startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())));
             Toast.makeText(this, "Allow Display over other apps first", Toast.LENGTH_LONG).show();
             return;
         }
@@ -486,14 +451,12 @@ public class MainActivity extends Activity {
         Toast.makeText(this, "KuruX Floating Panel Started!", Toast.LENGTH_SHORT).show();
     }
 
-    // UI Helper Methods
     private LinearLayout makeCard() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setBackground(roundRect(CARD_BG, 20));
         card.setPadding(dp(16), dp(14), dp(16), dp(14));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(12);
         card.setLayoutParams(lp);
         return card;
@@ -503,19 +466,16 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setPadding(0, dp(6), 0, dp(6));
-
         LinearLayout c1 = new LinearLayout(this);
         c1.setOrientation(LinearLayout.VERTICAL);
         c1.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         c1.addView(makeText(k1, 11, false, TEXT_SECONDARY));
         c1.addView(makeText(v1, 13, true, TEXT_PRIMARY));
-
         LinearLayout c2 = new LinearLayout(this);
         c2.setOrientation(LinearLayout.VERTICAL);
         c2.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         c2.addView(makeText(k2, 11, false, TEXT_SECONDARY));
         c2.addView(makeText(v2, 13, true, TEXT_PRIMARY));
-
         row.addView(c1);
         row.addView(c2);
         return row;
@@ -572,10 +532,10 @@ public class MainActivity extends Activity {
         b.setText(text);
         b.setAllCaps(false);
         b.setTextColor(fg);
-        b.setTextSize(13f);
+        b.setTextSize(12f);
         b.setTypeface(null, Typeface.BOLD);
         b.setBackground(roundRect(bg, 20));
-        b.setPadding(dp(16), dp(8), dp(16), dp(8));
+        b.setPadding(dp(14), dp(8), dp(14), dp(8));
         return b;
     }
 
